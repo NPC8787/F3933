@@ -215,14 +215,14 @@ class StockDB:
     q1_release = datetime(today.year, 5, 15)
     q2_release = datetime(today.year, 8, 14)
     q3_release = datetime(today.year, 11, 14)
-    annual_report_release = datetime(today.year + 1, 3, 31)
+    q4_release = datetime(today.year, 3, 31)
     if q1_release <= today < q2_release:
         report_type = "Q1"
     elif q2_release <= today < q3_release:
         report_type = "Q2"
-    elif q3_release <= today <  annual_report_release:
+    elif q3_release <= today <  datetime(today.year + 1, 3, 31) or datetime(today.year - 1, 11, 14) <= today < q4_release:
         report_type = "Q3"
-    elif  annual_report_release < today <= datetime(today.year + 1, 5, 15):
+    elif q4_release < today <= q1_release = datetime(today.year, 5, 15):
         report_type = "Q4"
     
     print(f"當前狀態: {report_type}")
