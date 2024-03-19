@@ -125,7 +125,7 @@ class StockAnalysis():
   def get_reply(self, messages):
     try:
       response = self.client.chat.completions.create(
-          model="gpt-3.5-turbo-1106",
+          model="gpt-3.5-turbo",
           temperature=0,
           messages=messages
       )
