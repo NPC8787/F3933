@@ -16,7 +16,7 @@ class PdfLoader:
     def __init__(self,openai_api_key):
         os.environ['OPENAI_API_KEY'] = openai_api_key
         
-        self.llm = ChatOpenAI(temperature=0, model="gpt-3.5-turbo-1106")
+        self.llm = ChatOpenAI(temperature=0, model="gpt-3.5-turbo")
         self.data_prompt=ChatPromptTemplate.from_messages(messages=[
             ("system","你現在是一位專業的年報分析師,"
             "你會詳細、嚴謹的統整年報並進行分析, 並提及重要的數字, 然後生成一份專業的年報分析報告,tokens的上限為1600。reply in 繁體中文"),
