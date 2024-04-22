@@ -129,6 +129,7 @@ class StockDB:
         df = pd.read_sql(sql, self.conn, parse_dates=['日期']) 
         column_order = ['股號', '日期', '營業收入', '營業費用', '稅後淨利', '每股盈餘']
         df = df[column_order]
+        
     else:
       df = pd.read_sql(sql, self.conn)
     return df
@@ -262,7 +263,10 @@ class StockDB:
           # 重新排列列的顺序
           combined_df = combined_df[['年份', '季度', '營業收入', '營業費用', '稅後淨利', '每股盈餘']]
           combined_df.insert(0, '股號', id)   # 加入股號欄
-          combined_df.to_sql('季頻', self.conn, if_exists='append', index=False)
+          try:
+            combined_df.to_sql('季頻', self.conn, if_exists='append', index=False)
+          except:
+              continue
       return print("更新完成")
    
 
