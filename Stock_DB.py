@@ -359,11 +359,14 @@ class StockDB:
           df3.columns = ['股號', '融資買入', '融卷賣出']
       time.sleep(2)
 
-      merged_df = df1.merge(df2, on='股號', how='inner')
-      merged_df = merged_df.merge(df3, on='股號', how='inner')
-      time.sleep(2)
-
-      return merged_df
+      try:
+        merged_df = df1.merge(df2, on='股號', how='inner')
+        merged_df = merged_df.merge(df3, on='股號', how='inner')
+        time.sleep(2)
+        return merged_df
+      except Exception as e:
+        print(f"Error during merging dataframes: {e}")
+        return pd.DataFrame()
 
   # 更新日頻的基本資訊
   def renew_daily(self):
