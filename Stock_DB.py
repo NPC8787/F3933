@@ -61,7 +61,7 @@ class StockDB:
     self.conn.commit()
 
   # 更新股票資訊
-  def renew(self, if_renew_qu = False):
+  def renew(self, if_renew_qu = True):
     self.renew_company() # 公司的基本資訊
     self.renew_daily() # 更新日頻的基本資訊
     if if_renew_qu == True:
