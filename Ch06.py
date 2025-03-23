@@ -48,7 +48,7 @@ class StockAnalysis():
     end = dt.date.today() # 資料結束時間
     start = end - dt.timedelta(days=days) # 資料開始時間
     # 下載資料
-    df = yf.download(stock_id, start=start)
+    df = yf.download(stock_id, start=start, auto_adjust=False, multi_level_index=False)
   
     # 更換列名
     df.columns = ['開盤價', '最高價', '最低價',
@@ -125,7 +125,7 @@ class StockAnalysis():
   def get_reply(self, messages):
     try:
       response = self.client.chat.completions.create(
-          model="gpt-3.5-turbo",
+          model="gpt-4",
           temperature=0,
           messages=messages
       )
