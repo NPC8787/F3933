@@ -303,22 +303,27 @@ class StockDB:
   # 日頻股價資料
   def stock_price(self, stock_list, start_date):
     # 下載資料
-    df = yf.download(stock, start=start, auto_adjust=False, multi_level_index=False)
+    df = yf.download(stock_list, start=start, auto_adjust=False, multi_level_index=False)
 
     if len(df) > 0: # 如果有下載到資料
-      # 更改欄位名稱
-      df.columns = ['開盤價', '最高價', '最低價', '收盤價', '成交量', '調整收盤價']
-      # 新增股票代碼欄位
-      df['股票代碼'] = stock
-      # 設定索引
-      df = df.reset_index()
-      df['日期'] = pd.to_datetime(df['Date'])
-      df = df.drop(['Date'], axis=1)
-      df = df[['股票代碼', '日期', '開盤價', '最高價', '最低價', '收盤價', '成交量', '調整收盤價']]
+        # 轉換資料
+        data_list = []
+        for stock in stock_list:
+            stock_df = df.xs(stock, axis=1, level=1).copy()
+            stock_df['Stock_Id'] = stock.replace('.TW', '')
+            data_list.append(stock_df)
 
-    else:
-      df = pd.DataFrame()
-    return df
+        yf_df = pd.concat(data_list).reset_index()
+
+        # 重新排列欄位
+        yf_df = yf_df[['Date', 'Stock_Id', 'Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume']]
+        yf_df.rename(columns={  # 修改欄位名稱以便對應到資料表
+            'Stock_Id':'股號','Date':'日期','Open':'開盤價','High':'最高價','Low':'最低價',
+            'Close':'收盤價', 'Adj Close':'還原價','Volume':'成交量',}, inplace=True)
+        # ↓將TimeStamp資料改為如 "2022-02-03" 的字串
+        yf_df['日期'] = yf_df['日期'].dt.strftime('%Y-%m-%d')
+
+        return yf_df
 
   # 進階日頻資料下載
   def stock_advanced(self, date):
