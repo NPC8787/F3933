@@ -5,7 +5,11 @@ import pandas as pd
 import yfinance as yf
 import os, time
 from datetime import datetime, timedelta
+import logging
 
+# 設置日誌
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger('StockDB')
 
 class StockDB:
   def __init__(self, db_path='/content/drive/MyDrive/StockGPT/stock.db', db_start_date='2015-01-01'):
@@ -15,7 +19,7 @@ class StockDB:
     self.conn = sqlite3.connect(db_path)
     self.ids = None
     if not exist: #如果未建立資料庫
-      print("建立資料庫：" + db_path)
+      logger.info("建立資料庫：" + db_path)
       self.create_tables() # 建立資料表
 
   # 建立資料表(不存在時才會建立)
@@ -152,55 +156,79 @@ class StockDB:
     # print(self.ids)
     if self.ids is not None:
       return self.ids
-    print("線上讀取股號、股名、及產業別")
+    logger.info("線上讀取股號、股名、及產業別")
     data=[]
-    response=requests.get('https://isin.twse.com.tw/isin/C_public.jsp?strMode=2')
-    url_data=BeautifulSoup(response.text, 'html.parser')
-    stock_company=url_data.find_all('tr')
-    for i in stock_company[2:]:
-        j=i.find_all('td')
-        l=j[0].text.split('\u3000')
-        if len(l[0].strip()) == 4:
-            stock_id,stock_name = l
-            industry = j[4].text.strip()
-            data.append([stock_id.strip(),stock_name,industry])
-        else:
-            break
-    df = pd.DataFrame(data, columns=['股號','股名','產業別'])
-    self.ids = df
-    return df
+    try:
+      response=requests.get('https://isin.twse.com.tw/isin/C_public.jsp?strMode=2')
+      response.raise_for_status()  # 確保請求成功
+      url_data=BeautifulSoup(response.text, 'html.parser')
+      stock_company=url_data.find_all('tr')
+      for i in stock_company[2:]:
+          j=i.find_all('td')
+          if len(j) < 5:  # 確保有足夠的列
+            continue
+          l=j[0].text.split('\u3000')
+          if len(l) == 2 and len(l[0].strip()) == 4 and l[0].strip().isdigit():
+              stock_id,stock_name = l
+              industry = j[4].text.strip()
+              data.append([stock_id.strip(),stock_name,industry])
+          else:
+              # 不是股票代碼或格式不符的情況，可能是其他類型的證券
+              continue
+      df = pd.DataFrame(data, columns=['股號','股名','產業別'])
+      self.ids = df
+      return df
+    except Exception as e:
+      logger.error(f"讀取股票資料失敗: {e}")
+      # 如果出錯，返回空的 DataFrame
+      return pd.DataFrame(columns=['股號','股名','產業別'])
 
   #更新公司基本資料, 預設只會加入新上市的公司, 若將參數all設為Ture則全部更新
   def renew_company(self, all=False):
-    df_old = self.get("公司", '股號,股名,產業別')
-    if all or df_old.empty: # 先刪除全部, 再重新讀取
-      self.conn.execute("DELETE FROM 公司")
-      df = self.stock_name()
-      print('更新所有的公司：', df)
-    else:
-      df_new = self.stock_name()
-      mask = df_new['股號'].isin(df_old['股號']) # 建立在new存在,在old也存在的遮罩
-      df = df_new[~mask] #反轉遮罩, 取出在new有在old沒有的資料
-      print('要更新的公司：', df)
+    try:
+      df_old = self.get("公司", '股號,股名,產業別')
+      if all or df_old.empty: # 先刪除全部, 再重新讀取
+        self.conn.execute("DELETE FROM 公司")
+        df = self.stock_name()
+        logger.info(f'更新所有的公司: {len(df)} 筆')
+      else:
+        df_new = self.stock_name()
+        mask = df_new['股號'].isin(df_old['股號']) # 建立在new存在,在old也存在的遮罩
+        df = df_new[~mask] #反轉遮罩, 取出在new有在old沒有的資料
+        logger.info(f'要更新的公司: {len(df)} 筆')
 
-    for id,name,industry in zip(df['股號'],df['股名'],df['產業別']):
-      try:
-        stock = yf.Ticker(id+".TW")
-        if not 'sharesOutstanding' in stock.info:
-          stock_sharesOutstanding = None
-        else:
-          stock_sharesOutstanding=stock.info['sharesOutstanding']
-        if not 'marketCap' in stock.info:
-          stock_marketCap = None
-        else:
-          stock_marketCap=stock.info['marketCap']
-  
-        self.conn.execute("INSERT INTO 公司 values(?,?,?,?,?)",
-                  (id,name,industry,stock_sharesOutstanding,stock_marketCap))
-        self.conn.commit()
-        # print(id)
-      except:
-        pass
+      if len(df) == 0:
+        logger.info('沒有新公司需要更新')
+        return
+        
+      # 使用事務處理
+      with self.conn:
+        for id,name,industry in zip(df['股號'],df['股名'],df['產業別']):
+          try:
+            # 添加重試機制
+            max_retries = 3
+            for attempt in range(max_retries):
+              try:
+                stock = yf.Ticker(id+".TW")
+                break
+              except Exception as e:
+                if attempt < max_retries - 1:
+                  logger.warning(f"嘗試獲取 {id} 資料時出錯，重試中... ({attempt+1}/{max_retries})")
+                  time.sleep(2)  # 等待一段時間後重試
+                else:
+                  raise e
+                
+            # 安全地獲取股票資訊
+            stock_sharesOutstanding = stock.info.get('sharesOutstanding', None)
+            stock_marketCap = stock.info.get('marketCap', None)
+    
+            self.conn.execute("INSERT INTO 公司 values(?,?,?,?,?)",
+                    (id,name,industry,stock_sharesOutstanding,stock_marketCap))
+            logger.info(f"已更新公司: {id} - {name}")
+          except Exception as e:
+            logger.error(f"更新公司 {id} 時出錯: {e}")
+    except Exception as e:
+      logger.error(f"renew_company 方法出錯: {e}")
 
   def quarter_to_int(self, year, quarter):
     quarter_dict = {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4}
@@ -208,275 +236,356 @@ class StockDB:
 
   # 更新季頻的基本資訊
   def renew_quarterly_frequency_basic(self):
-    #找出最後更新日期
-    cursor = self.conn.execute('SELECT 年份, 季度 FROM 季頻 ORDER BY 年份 DESC, 季度 DESC LIMIT 1')
-    m_date = cursor.fetchone()
-    latest_year, latest_quarter = m_date
-    print('季頻基本資料的最後更新日：', m_date)  #for debug
-    today = datetime.now()
-    q1_release = datetime(today.year, 5, 15)
-    q2_release = datetime(today.year, 8, 14)
-    q3_release = datetime(today.year, 11, 14)
-    q4_release = datetime(today.year, 3, 31)
-    if q1_release <= today < q2_release:
-        report_type = "Q1"
-    elif q2_release <= today < q3_release:
-        report_type = "Q2"
-    elif q3_release <= today <  datetime(today.year + 1, 3, 31) or datetime(today.year - 1, 11, 14) <= today < q4_release:
-        report_type = "Q3"
-    elif q4_release <= today < q1_release:
-        report_type = "Q4"
-    
-    print(f"當前狀態: {report_type}")
-    
-    if report_type == latest_quarter:
-      return print("不用更新")
-    else:
+    try:
+      #找出最後更新日期
+      cursor = self.conn.execute('SELECT 年份, 季度 FROM 季頻 ORDER BY 年份 DESC, 季度 DESC LIMIT 1')
+      m_date = cursor.fetchone()
+      if m_date:
+        latest_year, latest_quarter = m_date
+        logger.info(f'季頻基本資料的最後更新日：{latest_year} {latest_quarter}')
+      else:
+        logger.info('季頻表中沒有資料')
+        latest_year, latest_quarter = None, None
+        
+      today = datetime.now()
+      
+      # 根據當前日期確定要獲取的財報類型
+      # Q1（一季報）：5/15 前後公告
+      # Q2（二季報）：8/14 前後公告
+      # Q3（三季報）：11/14 前後公告
+      # Q4（年報）：隔年 3/31 前公告
+      
+      q1_release = datetime(today.year, 5, 15)
+      q2_release = datetime(today.year, 8, 14)
+      q3_release = datetime(today.year, 11, 14)
+      q4_release = datetime(today.year, 3, 31)
+      
+      # 修正季度判斷邏輯
+      if datetime(today.year, 3, 31) <= today < datetime(today.year, 5, 15):
+          # 3/31 - 5/15: 去年第四季數據已公布
+          report_type = "Q4"
+          report_year = str(today.year - 1)
+      elif datetime(today.year, 5, 15) <= today < datetime(today.year, 8, 14):
+          # 5/15 - 8/14: 今年第一季數據已公布
+          report_type = "Q1"
+          report_year = str(today.year)
+      elif datetime(today.year, 8, 14) <= today < datetime(today.year, 11, 14):
+          # 8/14 - 11/14: 今年第二季數據已公布
+          report_type = "Q2"
+          report_year = str(today.year)
+      elif today >= datetime(today.year, 11, 14):
+          # 11/14 後: 今年第三季數據已公布
+          report_type = "Q3"
+          report_year = str(today.year)
+          
+      logger.info(f"當前可獲取的最新財報: {report_year} {report_type}")
+      
+      # 判斷是否需要更新
+      if latest_year is not None and latest_quarter is not None:
+        latest_value = self.quarter_to_int(latest_year, latest_quarter)
+        current_value = self.quarter_to_int(report_year, report_type)
+        
+        if current_value <= latest_value:
+          logger.info("不需要更新季頻資料")
+          return
+      
       #更新季頻資料表
-      print('更新季頻')
+      logger.info('開始更新季頻資料')
       
       df = self.stock_name()
-      for id, name in zip(df['股號'],df['股名']):
-          df_data=[]
-          url = [f'https://tw.stock.yahoo.com/quote/{id}.TW/income-statement',
-                  f'https://tw.stock.yahoo.com/quote/{id}.TW/eps']
-          df = self.url_find(url[0])
-          print(id)
-          df = df.transpose()
-          df.columns = df.iloc[0]
-          df = df[1:]
-          df.insert(0,'年度/季別',df.index)
-          df.columns.name = None
-          df.reset_index(drop=True, inplace=True)
-          df_data.append(df)
-  
-          # 季EPS表
-          df=self.url_find(url[1])
-          df_data.append(df)
-  
-          # 將兩個 DataFrame 按列名合併
-          combined_df = df_data[0].merge(df_data[1], on='年度/季別')
-          # print 合併後的DataFrame
-          combined_df=combined_df.iloc[:,[0,1,3,5,6]]
-          combined_df[['年份', '季度']] = combined_df['年度/季別'].str.split(' ', expand=True)
-          combined_df.drop(columns=['年度/季別'], inplace=True)
-  
-          # 重新排列列的顺序
-          combined_df = combined_df[['年份', '季度', '營業收入', '營業費用', '稅後淨利', '每股盈餘']]
-          combined_df.insert(0, '股號', id)   # 加入股號欄
+      success_count = 0
+      total_count = len(df)
+      
+      with self.conn:  # 使用事務
+        for id, name in zip(df['股號'],df['股名']):
           try:
-            combined_df.to_sql('季頻', self.conn, if_exists='append', index=False)
-          except:
+            df_data=[]
+            url = [f'https://tw.stock.yahoo.com/quote/{id}.TW/income-statement',
+                    f'https://tw.stock.yahoo.com/quote/{id}.TW/eps']
+            
+            # 添加重試機制
+            max_retries = 3
+            for attempt in range(max_retries):
+              try:
+                df = self.url_find(url[0])
+                if df.empty:
+                  raise ValueError(f"無法獲取 {id} 的損益表資料")
+                break
+              except Exception as e:
+                if attempt < max_retries - 1:
+                  logger.warning(f"嘗試獲取 {id} 損益表時出錯，重試中... ({attempt+1}/{max_retries})")
+                  time.sleep(2)  # 等待一段時間後重試
+                else:
+                  raise ValueError(f"無法獲取 {id} 的損益表資料: {e}")
+            
+            # 處理得到的 DataFrame
+            logger.info(f"處理 {id} 的數據")
+            
+            # 檢查 DataFrame 是否為空
+            if df.empty:
+              logger.warning(f"股票 {id} 的損益表資料為空，跳過")
               continue
-      return print("更新完成")
+              
+            df = df.transpose()
+            # 檢查資料結構
+            if len(df) < 1:
+              logger.warning(f"股票 {id} 的損益表資料結構異常，跳過")
+              continue
+              
+            df.columns = df.iloc[0]
+            df = df[1:]
+            df.insert(0,'年度/季別',df.index)
+            df.columns.name = None
+            df.reset_index(drop=True, inplace=True)
+            df_data.append(df)
+    
+            # 季EPS表
+            for attempt in range(max_retries):
+              try:
+                df = self.url_find(url[1])
+                if df.empty:
+                  raise ValueError(f"無法獲取 {id} 的EPS資料")
+                break
+              except Exception as e:
+                if attempt < max_retries - 1:
+                  logger.warning(f"嘗試獲取 {id} EPS時出錯，重試中... ({attempt+1}/{max_retries})")
+                  time.sleep(2)  # 等待一段時間後重試
+                else:
+                  raise ValueError(f"無法獲取 {id} 的EPS資料: {e}")
+                  
+            df_data.append(df)
+    
+            # 檢查兩個 DataFrame 是否都有數據
+            if any(d.empty for d in df_data):
+              logger.warning(f"股票 {id} 的部分數據為空，跳過")
+              continue
+    
+            # 將兩個 DataFrame 按列名合併
+            try:
+              combined_df = df_data[0].merge(df_data[1], on='年度/季別')
+              
+              # 檢查合併後的 DataFrame 是否包含所需的所有列
+              required_columns = ['年度/季別', '營業收入', '營業費用', '稅後淨利', '每股盈餘']
+              if not all(col in combined_df.columns for col in required_columns):
+                missing_cols = [col for col in required_columns if col not in combined_df.columns]
+                logger.warning(f"股票 {id} 的合併數據缺少列: {missing_cols}，跳過")
+                continue
+                
+              # 安全地選擇列
+              combined_df = combined_df[required_columns]
+              
+              # 分割年份和季度
+              combined_df[['年份', '季度']] = combined_df['年度/季別'].str.split(' ', expand=True)
+              combined_df.drop(columns=['年度/季別'], inplace=True)
+              
+              # 確保所有數據列均為數值類型
+              for col in ['營業收入', '營業費用', '稅後淨利', '每股盈餘']:
+                combined_df[col] = pd.to_numeric(combined_df[col], errors='coerce')
+    
+              # 重新排列列的順序
+              combined_df = combined_df[['年份', '季度', '營業收入', '營業費用', '稅後淨利', '每股盈餘']]
+              combined_df.insert(0, '股號', id)   # 加入股號欄
+              
+              # 使用 INSERT OR REPLACE 語法來更新資料
+              combined_df.to_sql('季頻', self.conn, if_exists='append', index=False)
+              success_count += 1
+              logger.info(f"成功更新 {id} 的季頻資料")
+            except Exception as e:
+              logger.error(f"處理 {id} 的季頻資料時出錯: {e}")
+              continue
+          except Exception as e:
+            logger.error(f"更新 {id} 的季頻資料時出錯: {e}")
+            continue
+      
+      logger.info(f"季頻資料更新完成, 成功處理 {success_count}/{total_count} 個股票")
+      return
+    except Exception as e:
+      logger.error(f"renew_quarterly_frequency_basic 方法出錯: {e}")
    
 
-  def url_find(self,url):
-    words = url.split('/')
-    k = words[-1]
-    # 使用requests取得網頁內容
-    response = requests.get(url)
-    html = response.content
+  def url_find(self, url):
+    try:
+      words = url.split('/')
+      k = words[-1]
+      
+      # 使用requests取得網頁內容
+      response = requests.get(url, timeout=10)
+      response.raise_for_status()  # 確保請求成功
+      html = response.content
 
-    # 使用Beautiful Soup解析HTML內容
-    soup = BeautifulSoup(html, 'html.parser')
+      # 使用Beautiful Soup解析HTML內容
+      soup = BeautifulSoup(html, 'html.parser')
 
-    # 找到表格的表頭
-    table_soup = soup.find('section', {'id': 'qsp-{}-table'.format(k)})
-    table_fields=table_soup.find('div', class_='table-header')
+      # 找到表格的表頭
+      table_soup = soup.find('section', {'id': f'qsp-{k}-table'})
+      if not table_soup:
+        logger.warning(f"在 {url} 中找不到指定的表格區域")
+        return pd.DataFrame()  # 返回空的 DataFrame
+        
+      table_fields = table_soup.find('div', class_='table-header')
+      if not table_fields:
+        logger.warning(f"在 {url} 中找不到表頭")
+        return pd.DataFrame()  # 返回空的 DataFrame
 
-    table_fields_lines = list(table_fields.stripped_strings)
-    data_rows = table_soup.find_all('li' ,class_='List(n)')
+      table_fields_lines = list(table_fields.stripped_strings)
+      if len(table_fields_lines) < 2:
+        logger.warning(f"在 {url} 中表頭不完整")
+        return pd.DataFrame()  # 返回空的 DataFrame
+        
+      data_rows = table_soup.find_all('li', class_='List(n)')
 
-    # 解析資料行內容
-    data = []
-    for row in data_rows:
-        row_data = list(row.stripped_strings)
-        # row_data[1:] = [item.replace(',', '') for item in row_data[1:]]
-        row_data[1] = row_data[1].replace(',', '')
-        data.append(row_data[0:2])
+      # 解析資料行內容
+      data = []
+      for row in data_rows:
+          row_data = list(row.stripped_strings)
+          if len(row_data) < 2:
+            continue  # 跳過資料不完整的行
+          # 移除數字中的逗號
+          row_data[1] = row_data[1].replace(',', '')
+          data.append(row_data[0:2])
 
-    # 建立 DataFrame
-    df = pd.DataFrame(data, columns=table_fields_lines[0:2])
-    return df
+      # 建立 DataFrame
+      if len(data) == 0:
+        logger.warning(f"在 {url} 中沒有找到數據行")
+        return pd.DataFrame()  # 返回空的 DataFrame
+        
+      df = pd.DataFrame(data, columns=table_fields_lines[0:2])
+      return df
+    except Exception as e:
+      logger.error(f"url_find 方法出錯 (URL: {url}): {e}")
+      return pd.DataFrame()  # 返回空的 DataFrame
 
   # 日頻股價資料
   def stock_price(self, stock_list, start_date):
-    # 下載資料
-    df = yf.download(stock_list, start=start, auto_adjust=False, multi_level_index=False)
+    try:
+      # 下載資料
+      df = yf.download(stock_list, start=start_date, auto_adjust=False, multi_level_index=False)
 
-    if len(df) > 0: # 如果有下載到資料
-        # 轉換資料
-        data_list = []
-        for stock in stock_list:
-            stock_df = df.xs(stock, axis=1, level=1).copy()
-            stock_df['Stock_Id'] = stock.replace('.TW', '')
-            data_list.append(stock_df)
+      if len(df) > 0: # 如果有下載到資料
+          # 轉換資料
+          data_list = []
+          for stock in stock_list:
+              try:
+                stock_df = df.xs(stock, axis=1, level=1).copy()
+                stock_df['Stock_Id'] = stock.replace('.TW', '')
+                data_list.append(stock_df)
+              except Exception as e:
+                logger.error(f"處理股票 {stock} 的數據時出錯: {e}")
 
-        yf_df = pd.concat(data_list).reset_index()
+          if not data_list:
+            logger.warning("沒有成功處理任何股票數據")
+            return pd.DataFrame()
 
-        # 重新排列欄位
-        yf_df = yf_df[['Date', 'Stock_Id', 'Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume']]
-        yf_df.rename(columns={  # 修改欄位名稱以便對應到資料表
-            'Stock_Id':'股號','Date':'日期','Open':'開盤價','High':'最高價','Low':'最低價',
-            'Close':'收盤價', 'Adj Close':'還原價','Volume':'成交量',}, inplace=True)
-        # ↓將TimeStamp資料改為如 "2022-02-03" 的字串
-        yf_df['日期'] = yf_df['日期'].dt.strftime('%Y-%m-%d')
+          yf_df = pd.concat(data_list).reset_index()
 
-        return yf_df
+          # 重新排列欄位
+          expected_columns = ['Date', 'Stock_Id', 'Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume']
+          if not all(col in yf_df.columns for col in expected_columns):
+            missing_cols = [col for col in expected_columns if col not in yf_df.columns]
+            logger.error(f"股價數據缺少必要的列: {missing_cols}")
+            return pd.DataFrame()
+            
+          yf_df = yf_df[expected_columns]
+          yf_df.rename(columns={  # 修改欄位名稱以便對應到資料表
+              'Stock_Id':'股號','Date':'日期','Open':'開盤價','High':'最高價','Low':'最低價',
+              'Close':'收盤價', 'Adj Close':'還原價','Volume':'成交量',}, inplace=True)
+          # ↓將TimeStamp資料改為如 "2022-02-03" 的字串
+          yf_df['日期'] = yf_df['日期'].dt.strftime('%Y-%m-%d')
+
+          return yf_df
+      else:
+        logger.warning(f"從 {start_date} 開始沒有下載到任何股價數據")
+        return pd.DataFrame()
+    except Exception as e:
+      logger.error(f"stock_price 方法出錯: {e}")
+      return pd.DataFrame()
 
   # 進階日頻資料下載
   def stock_advanced(self, date):
+    try:
       urls = [
           f"https://www.twse.com.tw/rwd/zh/afterTrading/BWIBBU_d?date={date}&selectType=ALL&response=json",
           f"https://www.twse.com.tw/rwd/zh/fund/T86?date={date}&selectType=ALLBUT0999&response=json",
           f"https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?date={date}&selectType=STOCK&response=json"
       ]
+      dfs = []
+      
       # 取得本益比資料
-      json_data1=requests.get(urls[0]).json()
-      # 有資料才執行程式
-      if 'stat' in json_data1 and json_data1['stat'] == 'OK':
-          df1 = pd.DataFrame(json_data1['data'], columns=json_data1['fields'])
-          df1 = df1[['證券代號','殖利率(%)','本益比','股價淨值比']]
-          df1.insert(1, '日期', datetime.strptime(date, '%Y%m%d').strftime('%Y-%m-%d'))
-          df1.rename(columns={
-                  '證券代號':'股號','殖利率(%)':'殖利率','本益比':'日本益比'
-                  }, inplace=True)
+      try:
+        response = requests.get(urls[0], timeout=10)
+        response.raise_for_status()
+        json_data1 = response.json()
+        # 有資料才執行程式
+        if 'stat' in json_data1 and json_data1['stat'] == 'OK' and 'data' in json_data1 and json_data1['data']:
+            df1 = pd.DataFrame(json_data1['data'], columns=json_data1['fields'])
+            df1 = df1[['證券代號','殖利率(%)','本益比','股價淨值比']]
+            df1.insert(1, '日期', datetime.strptime(date, '%Y%m%d').strftime('%Y-%m-%d'))
+            df1.rename(columns={
+                    '證券代號':'股號','殖利率(%)':'殖利率','本益比':'日本益比'
+                    }, inplace=True)
+            dfs.append(df1)
+      except Exception as e:
+        logger.error(f"獲取本益比資料時出錯 (日期: {date}): {e}")
+        
       time.sleep(2)
+      
       # 取得法人買賣超資料
-      json_data2=requests.get(urls[1]).json()
-      if 'stat' in json_data2 and json_data2['stat'] == 'OK':
-          df2 = pd.DataFrame(json_data2['data'], columns=json_data2['fields'])
-          df2 = df2[['證券代號','三大法人買賣超股數']]
-          df2.rename(columns={
-                  '證券代號':'股號'
-                  }, inplace=True)
+      try:
+        response = requests.get(urls[1], timeout=10)
+        response.raise_for_status()
+        json_data2 = response.json()
+        if 'stat' in json_data2 and json_data2['stat'] == 'OK' and 'data' in json_data2 and json_data2['data']:
+            df2 = pd.DataFrame(json_data2['data'], columns=json_data2['fields'])
+            df2 = df2[['證券代號','三大法人買賣超股數']]
+            df2.rename(columns={
+                    '證券代號':'股號'
+                    }, inplace=True)
+            dfs.append(df2)
+      except Exception as e:
+        logger.error(f"獲取法人買賣超資料時出錯 (日期: {date}): {e}")
+        
       time.sleep(2)
+      
       # 取得融資融券資料
-      json_data3=requests.get(urls[2]).json()
-      if 'stat' in json_data3 and json_data3['stat'] == 'OK':
-          data = pd.DataFrame(json_data3['tables'][1]['data'])
-          df3 = data.iloc[:, [0, 2, 9]]
-          df3.columns = ['股號', '融資買入', '融卷賣出']
+      try:
+        response = requests.get(urls[2], timeout=10)
+        response.raise_for_status()
+        json_data3 = response.json()
+        if 'stat' in json_data3 and json_data3['stat'] == 'OK' and 'tables' in json_data3 and len(json_data3['tables']) > 1 and 'data' in json_data3['tables'][1] and json_data3['tables'][1]['data']:
+            data = pd.DataFrame(json_data3['tables'][1]['data'])
+            if len(data.columns) >= 10:  # 確保有足夠的列
+              df3 = data.iloc[:, [0, 2, 9]]
+              df3.columns = ['股號', '融資買入', '融卷賣出']
+              dfs.append(df3)
+      except Exception as e:
+        logger.error(f"獲取融資融券資料時出錯 (日期: {date}): {e}")
+        
       time.sleep(2)
 
+      # 檢查是否有數據
+      if not dfs:
+        logger.warning(f"沒有獲取到任何進階日頻數據 (日期: {date})")
+        return pd.DataFrame()
+        
       try:
-        merged_df = df1.merge(df2, on='股號', how='inner')
-        merged_df = merged_df.merge(df3, on='股號', how='inner')
-        time.sleep(2)
+        # 使用 reduce 函數從左到右連續合併 DataFrames
+        from functools import reduce
+        merged_df = reduce(lambda left, right: pd.merge(left, right, on='股號', how='inner'), dfs)
         return merged_df
       except Exception as e:
-        print(f"Error during merging dataframes: {e}")
+        logger.error(f"合併進階日頻數據時出錯 (日期: {date}): {e}")
         return pd.DataFrame()
+    except Exception as e:
+      logger.error(f"stock_advanced 方法出錯 (日期: {date}): {e}")
+      return pd.DataFrame()
 
   # 更新日頻的基本資訊
   def renew_daily(self):
-    #找出最後更新日期
-    cursor = self.conn.execute('SELECT MAX(日期) FROM 日頻 WHERE 開盤價 IS NOT NULL')
-    m_date = cursor.fetchone()[0]
-    print('日頻基本資料的最後更新日：', m_date)  #for debug
-    if not m_date:
-      start_date = self.db_start_date  #抓全部
-    else:
-      input_date = datetime.strptime(m_date, '%Y-%m-%d') # 將字串轉換為日期型別
-      next_day = input_date + timedelta(days=1) # 將日期加一天
-      today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-      if next_day >= today: #如果不用更新
-        print("不用更新！")
-        return
-      start_date = next_day.strftime('%Y-%m-%d') # 格式化日期為 "2020-02-23" 格式的字串
-
-    print("開始日期：", start_date)
-    # 要更新的股票代碼
-    stock_list = (self.stock_name()['股號'] + '.TW').tolist()
-
-    # 先取得股價資料
-    base_df = self.stock_price(stock_list, start_date)
-    # 交易日期
-    date_list = base_df['日期'].str.replace('-', '')
-    date_list = date_list.unique().tolist()
-    date_list.pop()
-    # 證交所資料更新
-    print("更新日本益比、融資融卷、三大法人資料")
-    if len(date_list) == 0:
-      print('不用更新!')
-      return
-    advance_df = pd.DataFrame()
-    for date in date_list:
-      print("完成更新:", date)
-      df = self.stock_advanced(date)
-      advance_df = pd.concat([advance_df,df])
-
-    # 所有表格
-    final_df = pd.merge(base_df, advance_df, on=['日期', '股號'], how='inner')
-    print(final_df)
-    final_df.to_sql('日頻', self.conn, if_exists='append', index=False)
-
-
-  # 顯示所有資料表的結構及索引資訊
-  def table_info(self):
-    t_list = {}
-    # 取得所有資料表的名稱
-    cursor = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table';")
-    table_names = cursor.fetchall()
-
-    print("●顯示所有資料表的結構及索引資訊")
-    print("=" * 40)
-    for table in table_names:
-      table_name = table[0]
-      print(f"資料表：{table_name}\n")
+    try:
+      #找出最後更新日期
+      cursor = self.conn.execute('SELECT MAX(日期) FROM 日頻 WHERE 開盤價 IS NOT NULL')
+      m_date = cursor.fetchone()[0]
+      logger.info(f'日頻基本資料的最後更新日：{m_date}')
       
-      # 取得資料表的欄位資訊
-      cursor.execute(f"PRAGMA table_info({table_name});")
-      columns = cursor.fetchall()
-      column_names = [] # 用來儲存當前表的所有欄位名
-      for column in columns:
-        if column[5] == 0:
-          column_names.append(column[1])
-          print(f"欄位：{column[1]}, {column[2]}")
-        else:
-          column_names.append(column[1])
-          print(f"欄位：{column[1]}, {column[2]}, 主键：{column[5]}")
-
-      # 取得資料表的索引資訊
-      cursor.execute(f"PRAGMA index_list({table_name});")
-      indexes = cursor.fetchall()
-      for index in indexes:
-          index_name = index[1]
-          is_unique = "唯一" if index[2] else "非唯一"
-          print(f"索引：{index_name}, 類型：{is_unique}")
-      t_list[table_name] = column_names
-      print("=" * 40)
-    return t_list
-
-  # 檢查所有資料表的資料範圍及空值狀況
-  # 可用 table_list 指定要check哪些table, 以序號(0~4)指定, 例如 [1,3,4]
-  def table_check(self, table_list=None):
-    table = ('公司','日頻','季頻')
-    table_msg = ('公司(記錄數, 股號數)',
-           '日頻(記錄數, 股號數, 由, 到)',
-           '季頻(記錄數, 股號數, 由, 到)')
-    query = (
-      ('''SELECT
-        COUNT(*) AS 記錄數, COUNT(DISTINCT 股號) AS 股號數
-        FROM 公司'''),
-      ('''SELECT
-        COUNT(*) AS 記錄數, COUNT(DISTINCT 股號) AS 股號數,
-        MIN(日期) AS 由, MAX(日期) AS 到
-        FROM 日頻'''),
-      ('''SELECT
-        COUNT(*) AS 記錄數, COUNT(DISTINCT 股號) AS 股號數,
-        MIN(年份) AS 由, MAX(年份) AS 到
-        FROM 季頻'''))
-    print("●檢查所有資料表的資料筆數、日期範圍、及空值狀況")
-    if table_list is None:
-      table_list = range(3)
-    for i in table_list:
-      # 顯示資料筆數及日期範圍
-      print("=" * 40)
-      cursor = self.conn.execute(query[i])
-      result = cursor.fetchone()
-      print(f"○{table_msg[i]}")
-      print(result)
-
-    print("=" * 40)
+      if not m_date:
+        start_
