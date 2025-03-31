@@ -1,7 +1,6 @@
 import getpass
 import openai
 from openai import OpenAI
-import tiktoken
 import yfinance as yf
 import numpy as np
 import requests
@@ -51,8 +50,8 @@ class StockAnalysis():
     df = yf.download(stock_id, start=start, auto_adjust=False, multi_level_index=False)
   
     # 更換列名
-    df.columns = ['開盤價', '最高價', '最低價',
-                  '收盤價', '調整後收盤價', '成交量']
+    df.columns = ['調整後收盤價', '收盤價', '最高價',
+                  '最低價', '開盤價', '成交量']
   
     data = {
       '日期': df.index.strftime('%Y-%m-%d').tolist(),
@@ -71,13 +70,13 @@ class StockAnalysis():
     stock = yf.Ticker(stock_id)
   
     # 營收成長率
-    quarterly_revenue_growth = np.round(stock.quarterly_financials.loc["Total Revenue"].pct_change(-1).dropna().tolist(), 2)
+    quarterly_revenue_growth = np.round(stock.quarterly_financials.loc["Total Revenue"].pct_change(-1, fill_method=None).dropna().tolist(), 2)
   
     # 每季EPS
     quarterly_eps = np.round(stock.quarterly_financials.loc["Basic EPS"].dropna().tolist(), 2)
   
     # EPS季增率
-    quarterly_eps_growth = np.round(stock.quarterly_financials.loc["Basic EPS"].pct_change(-1).dropna().tolist(), 2)
+    quarterly_eps_growth = np.round(stock.quarterly_financials.loc["Basic EPS"].pct_change(-1, fill_method=None).dropna().tolist(), 2)
   
     # 轉換日期
     dates = [date.strftime('%Y-%m-%d') for date in stock.quarterly_financials.columns]
@@ -125,7 +124,7 @@ class StockAnalysis():
   def get_reply(self, messages):
     try:
       response = self.client.chat.completions.create(
-          model="gpt-4",
+          model="gpt-3.5-turbo",
           temperature=0,
           messages=messages
       )
